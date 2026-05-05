@@ -1,6 +1,6 @@
 # laserHeatFoam
 
-An OpenFOAM solver for thermal simulation of **Laser Powder Bed Fusion (L-PBF)** additive manufacturing processes. The solver resolves the moving laser heat source, phase-dependent material properties, latent heat of fusion, and physically consistent surface boundary conditions including radiation, conduction and evaporation.
+An OpenFOAM solver for thermal simulation of **Laser Powder Bed Fusion (L-PBF)** additive manufacturing processes. The solver resolves the moving laser heat source, phase-dependent material properties, latent heat of fusion, physically consistent surface boundary conditions including radiation, conduction and evaporation, and progressive layer-by-layer activation for multi-layer cases.
 
 The physical and numerical models are based on:
 
@@ -19,10 +19,11 @@ The physical and numerical models are based on:
 6. [Boundary Conditions](#6-boundary-conditions)
 7. [Diffusion Number and Time Step Control](#7-diffusion-number-and-time-step-control)
 8. [Solver Algorithm](#8-solver-algorithm)
-9. [Case Setup](#9-case-setup)
-10. [Building and Running](#10-building-and-running)
-11. [Output Fields](#11-output-fields)
-12. [References](#12-references)
+9. [Multi-Layer Activation and AMR](#9-multi-layer-activation-and-amr)
+10. [Case Setup](#10-case-setup)
+11. [Building and Running](#11-building-and-running)
+12. [Output Fields](#12-output-fields)
+13. [References](#13-references)
 
 ---
 
@@ -365,11 +366,41 @@ Each time step executes the following sequence:
 12. Write output fields (T, k, Q, rc, fL, rp, rm, rs, gradT, ...)
 ```
 
-Steps 11 uses OpenFOAM's `SIMPLE` non-orthogonal corrector loop to handle mesh non-orthogonality.
+Step 11 uses OpenFOAM's `SIMPLE` non-orthogonal corrector loop to handle mesh non-orthogonality.
+
+For multi-layer cases, the timestep loop is wrapped in an outer layer-activation loop driven by `constant/multiLayerProperties`. If `constant/dynamicMeshDict` is present, the base mesh can also be refined around the melt-history interface using `dynamicRefineFvMesh`.
 
 ---
 
-## 9. Case Setup
+## 9. Multi-Layer Activation and AMR
+
+The multi-layer mode activates pre-meshed layers one at a time using `fvMeshSubset`. Layer 0 is seeded from the cells adjacent to `baseplatePatch`; subsequent layers are grown by face-neighbour expansion.
+
+The key multi-layer inputs are read from `constant/multiLayerProperties`:
+
+```text
+baseplatePatch     baseplate;
+nLayers            4;
+cellsPerLayer      3;
+layerDuration      200e-6;
+layerInitialT      300;
+exposedFacesPatch  top;
+```
+
+`cellsPerLayer` defaults to `1` if omitted. If `exposedFacesPatch` is not set, the exposed subset faces are written to the synthetic `oldInternalFaces` patch.
+
+The solver keeps the persistent base-mesh fields under explicit names, interpolates them onto the active sub-mesh for each layer, and scatters the solved state back to the base mesh before writing. The multi-layer tutorial therefore writes the full domain at every output time, even though only the active subset is solved.
+
+The AMR extension uses `dynamicRefineFvMesh` with a `refineIndicator` field built from smoothed `meltHistory`. A persistent `layerID` field tracks which layer each cell belongs to so layer membership survives mesh refinement.
+
+The end-to-end example is `tutorials/multiLayer_basic`. Its `Allrun` script supports:
+
+- `runMode=serial` for a single-process run
+- `runMode=parallel` for the 4-rank setup used by the tutorial
+
+---
+
+## 10. Case Setup
 
 ### Directory Structure
 
@@ -447,11 +478,11 @@ T1    1268;       // conductivity breakpoint [K]
 
 ---
 
-## 10. Building and Running
+## 11. Building and Running
 
 ### Prerequisites
 
-- OpenFOAM v2006 or later (tested with v2506 on macOS/Linux)
+- OpenFOAM v2512 recommended by default for this repository
 - The `pbfRadEvapTemperature` boundary condition library must be built first
 
 ### Build
@@ -473,6 +504,13 @@ cd tutorials/LPBF_titanium_case_195W_1mps
 ./Allrun
 ```
 
+For the multi-layer tutorial:
+
+```bash
+cd tutorials/multiLayer_basic
+./Allrun
+```
+
 or step by step:
 
 ```bash
@@ -491,7 +529,7 @@ reconstructPar
 
 ---
 
-## 11. Output Fields
+## 12. Output Fields
 
 The following fields are written every `writeInterval`:
 
@@ -509,13 +547,15 @@ The following fields are written every `writeInterval`:
 | `cp` | Specific heat [J/kg/K] |
 | `cpEff` | Effective specific heat including latent heat [J/kg/K] |
 | `meltHistory` | Binary: 1 if cell ever exceeded `Tl` (full melt indicator) |
+| `layerID` | Multi-layer membership index for each cell |
+| `refineIndicator` | AMR driver field for `dynamicRefineFvMesh` |
 | `gradT` | Temperature gradient vector [K/m] |
 
-The `meltHistory` and `rc` fields are particularly useful for post-processing melt pool dimensions, track morphology, and lack-of-fusion prediction.
+The `meltHistory`, `rc`, `layerID`, and `refineIndicator` fields are particularly useful for post-processing melt pool dimensions, track morphology, layer activation, and lack-of-fusion prediction.
 
 ---
 
-## 12. References
+## 13. References
 
 ```
 [1] Mohammadkamal H., Caiazzo F. (2025).
